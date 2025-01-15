@@ -11,6 +11,8 @@
     <link rel="apple-touch-icon" sizes="76x76" href="icon-ipad.png">
     <link rel="apple-touch-icon" sizes="120x120" href="icon-iphone-retina.png">
     <link rel="apple-touch-icon" sizes="152x152" href="icon-ipad-retina.png">
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <style>
         body {
             margin: 0;
@@ -202,6 +204,88 @@
                 border-color: rgba(255, 0, 0, 0.3);
             }
         }
+
+        .gesture-label {
+            position: absolute;
+            background: rgba(255, 0, 0, 0.8);
+            color: #000;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            padding: 5px 10px;
+            border: 1px solid #ff0000;
+            text-transform: uppercase;
+            box-shadow: 0 0 10px rgba(255, 0, 0, 0.5);
+            z-index: 1000;
+            white-space: nowrap;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+
+        .gesture-label.visible {
+            opacity: 1;
+        }
+
+        .gesture-connector {
+            position: absolute;
+            background: #ff0000;
+            height: 2px;
+            z-index: 999;
+            box-shadow: 0 0 5px rgba(255, 0, 0, 0.5);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+
+        .gesture-connector::before {
+            content: '';
+            position: absolute;
+            width: 2px;
+            height: 30px;
+            background: #ff0000;
+            box-shadow: 0 0 5px rgba(255, 0, 0, 0.5);
+            left: 0;
+            top: -15px;
+        }
+
+        .gesture-connector.visible {
+            opacity: 1;
+        }
+
+        .face-detection-label {
+            position: absolute;
+            left: 20px;
+            bottom: 15px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #ff0000;
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            padding: 8px 20px;
+            border: 1px solid #ff0000;
+            clip-path: polygon(0 0, 85% 0, 100% 100%, 0 100%);
+            text-shadow: 0 0 5px #ff0000;
+            box-shadow: 0 0 10px rgba(255, 0, 0, 0.5);
+        }
+
+        .swipe-direction {
+            position: fixed;
+            top: 50px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #ff0000;
+            font-family: 'Courier New', monospace;
+            font-size: 48px;
+            font-weight: bold;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px #ff0000;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            z-index: 1000;
+        }
+
+        .swipe-direction.visible {
+            opacity: 1;
+        }
     </style>
 </head>
 
@@ -212,26 +296,42 @@
     <div class="timestamp"></div>
     <div class="recording-dot"></div>
     <div class="targeting-circle"></div>
+    <canvas id="hand_canvas" style="position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 200; filter: drop-shadow(0 0 5px rgba(255, 0, 0, 0.7));"></canvas>
     <div class="hud-element" style="top: 20px; left: 20px; width: 100px; height: 1px;"></div>
     <div class="hud-element" style="top: 20px; right: 20px; width: 100px; height: 1px;"></div>
     <div class="hud-element" style="bottom: 20px; left: 20px; width: 100px; height: 1px;"></div>
     <div class="hud-element" style="bottom: 20px; right: 20px; width: 100px; height: 1px;"></div>
+    <div class="swipe-direction"></div>
 
     <script type="module">
-        import { FaceDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+        import { FaceDetector, FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
 
         let faceDetector;
+        let handLandmarker;
         let video = document.getElementById('webcam');
         let lastVideoTime = -1;
         let faceMask = document.querySelector('.face-mask');
         let overlay = document.querySelector('.surveillance-overlay');
         let targetingCircle = document.querySelector('.targeting-circle');
 
-        // Инициализация детектора лиц
-        async function initializeFaceDetector() {
+        // Константы
+        const HAND_TIMEOUT_MS = 300; // Максимальное время отсутствия руки
+        const SWIPE_THRESHOLD = 0.15; // Порог для определения свайпа
+        const GESTURE_MEMORY = 10; // Количество кадров для памяти жестов
+
+        let lastHandPosition = null;
+        let lastHandTime = 0;
+        let lastGesture = null;
+        let gestureHistory = [];
+        let swipeDirection = document.querySelector('.swipe-direction');
+        let isSwipeStarted = false; // Флаг начала свайпа
+        
+        // Инициализация детекторов
+        async function initializeDetectors() {
             const vision = await FilesetResolver.forVisionTasks(
                 "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
             );
+            
             faceDetector = await FaceDetector.createFromOptions(vision, {
                 baseOptions: {
                     modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite`,
@@ -239,7 +339,155 @@
                 },
                 runningMode: "VIDEO"
             });
+
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                    delegate: "CPU"
+                },
+                runningMode: "VIDEO",
+                numHands: 2
+            });
+
             startWebcam();
+        }
+
+        // Функция проверки выпрямленного указательного пальца
+        function isPointerExtended(landmarks) {
+            const indexTip = landmarks[8];
+            const middleTip = landmarks[12];
+            const ringTip = landmarks[16];
+            const pinkyTip = landmarks[17];
+            
+            return indexTip.y < landmarks[5].y - 0.1 && // Указательный палец выпрямлен
+                   middleTip.y > landmarks[9].y - 0.05 && // Остальные пальцы согнуты
+                   ringTip.y > landmarks[13].y - 0.05 &&
+                   pinkyTip.y > landmarks[17].y - 0.05;
+        }
+
+        // Функция для определения свайпа
+        function detectSwipe(currentPosition, landmarks) {
+            if (!currentPosition) return null;
+            
+            // Если свайп еще не начат, проверяем положение пальца
+            if (!isSwipeStarted) {
+                if (isPointerExtended(landmarks)) {
+                    isSwipeStarted = true;
+                    lastHandPosition = currentPosition;
+                }
+                return null;
+            }
+            
+            // Если свайп начат, но палец согнулся - отменяем свайп
+            if (!isPointerExtended(landmarks)) {
+                isSwipeStarted = false;
+                lastHandPosition = null;
+                return null;
+            }
+            
+            const deltaX = currentPosition.x - lastHandPosition.x;
+            console.log('Swipe delta:', deltaX);
+            
+            if (Math.abs(deltaX) > SWIPE_THRESHOLD) {
+                const direction = deltaX > 0 ? 'right' : 'left';
+                console.log('Swipe detected:', direction);
+                // Сбрасываем состояние свайпа
+                isSwipeStarted = false;
+                lastHandPosition = null;
+                return direction;
+            }
+            
+            // Обновляем позицию для следующего кадра
+            lastHandPosition = currentPosition;
+            return null;
+        }
+
+        // Функция для определения жестов с учетом истории
+        function detectGesture(landmarks) {
+            if (!landmarks || landmarks.length === 0) {
+                const now = performance.now();
+                if (now - lastHandTime < HAND_TIMEOUT_MS && lastGesture) {
+                    return lastGesture;
+                }
+                return 'no_gesture';
+            }
+            
+            lastHandTime = performance.now();
+            
+            // Создаем копию ключевых точек с инвертированными x-координатами
+            const mirroredLandmarks = landmarks.map(point => ({
+                x: 1 - point.x,
+                y: point.y,
+                z: point.z
+            }));
+            
+            const thumbTip = mirroredLandmarks[4];
+            const indexTip = mirroredLandmarks[8];
+            const middleTip = mirroredLandmarks[12];
+            const ringTip = mirroredLandmarks[16];
+            const pinkyTip = mirroredLandmarks[20];
+
+            // Определяем жест "окей"
+            const thumbIndexDistance = Math.sqrt(
+                Math.pow(thumbTip.x - indexTip.x, 2) + 
+                Math.pow(thumbTip.y - indexTip.y, 2)
+            );
+
+            // Дополнительные проверки для жеста OK
+            const isThumbAndIndexClose = thumbIndexDistance < 0.1;
+            
+            // Подробное логирование для отладки OK жеста
+            console.log('OK Detection Debug:', {
+                thumbIndexDistance,
+                isThumbAndIndexClose,
+                thumbTipPos: { x: thumbTip.x, y: thumbTip.y },
+                indexTipPos: { x: indexTip.x, y: indexTip.y }
+            });
+            
+            // Проверяем только близость большого и указательного пальцев
+            if (isThumbAndIndexClose) {
+                console.log('OK gesture detected');
+                lastGesture = 'ok';
+                // Сбрасываем lastHandPosition при жесте OK
+                lastHandPosition = null;
+                isSwipeStarted = false; // Сбрасываем флаг свайпа
+                return 'ok';
+            }
+
+            // Определяем жест "указательный палец"
+            if (indexTip.y < mirroredLandmarks[5].y - 0.1 && // Палец должен быть явно выше основания
+                middleTip.y > mirroredLandmarks[9].y - 0.05 && 
+                ringTip.y > mirroredLandmarks[13].y - 0.05 && 
+                pinkyTip.y > mirroredLandmarks[17].y - 0.05) {
+                
+                console.log('Pointer detected');
+                lastGesture = 'pointer';
+                
+                // Проверяем свайп только для указательного пальца
+                const swipe = detectSwipe(mirroredLandmarks[8], mirroredLandmarks);
+                console.log('Swipe detection:', swipe);
+                console.log('Gesture history:', gestureHistory);
+                
+                // Показываем направление свайпа если он есть
+                if (swipe) {
+                    console.log('Showing swipe direction:', swipe);
+                    swipeDirection.textContent = swipe.toUpperCase();
+                    swipeDirection.classList.add('visible');
+                    setTimeout(() => {
+                        swipeDirection.classList.remove('visible');
+                    }, 1000);
+                }
+                
+                return 'pointer';
+            } else {
+                // Если палец согнут, отменяем свайп
+                isSwipeStarted = false;
+                lastHandPosition = null;
+            }
+            
+            console.log('Other gesture detected');
+            lastGesture = 'other';
+            return 'other';
         }
 
         // Запуск веб-камеры
@@ -264,21 +512,83 @@
             document.querySelector('.timestamp').textContent = timestamp;
         }
 
+        // Создаем элементы один раз при инициализации
+        function createGestureElements() {
+            const label = document.createElement('div');
+            label.className = 'gesture-label';
+            document.body.appendChild(label);
+
+            const connector = document.createElement('div');
+            connector.className = 'gesture-connector';
+            document.body.appendChild(connector);
+
+            return { label, connector };
+        }
+
+        let gestureElements = null;
+
+        // Функция для обновления метки жеста
+        function updateGestureLabel(gesture, handX, handY, canvasWidth, canvasHeight) {
+            // Создаем элементы, если они еще не созданы
+            if (!gestureElements) {
+                gestureElements = createGestureElements();
+            }
+
+            const { label, connector } = gestureElements;
+
+            if (!handX || !handY) {
+                // Скрываем элементы, если рука не обнаружена
+                label.classList.remove('visible');
+                connector.classList.remove('visible');
+                return;
+            }
+
+            // Показываем элементы
+            label.classList.add('visible');
+            connector.classList.add('visible');
+
+            // Обновляем текст метки
+            label.textContent = gesture === 'other' ? 'HAND' : gesture.toUpperCase();
+
+            // Позиционируем метку справа от руки
+            const labelX = handX * canvasWidth + 100;
+            const labelY = handY * canvasHeight - 30;
+
+            label.style.left = `${labelX}px`;
+            label.style.top = `${labelY}px`;
+
+            // Обновляем позицию и размер коннектора
+            connector.style.left = `${handX * canvasWidth + 20}px`;
+            connector.style.top = `${handY * canvasHeight}px`;
+            connector.style.width = '80px';
+        }
+
         // Основной цикл детекции
         async function predictWebcam() {
+            const handCanvas = document.getElementById('hand_canvas');
+            handCanvas.width = video.clientWidth;
+            handCanvas.height = video.clientHeight;
+            const handCtx = handCanvas.getContext('2d');
+            
             if (video.currentTime !== lastVideoTime) {
                 lastVideoTime = video.currentTime;
                 const startTimeMs = performance.now();
-                const detections = faceDetector.detectForVideo(video, startTimeMs).detections;
+                
+                // Детекция лиц
+                const faceDetections = faceDetector.detectForVideo(video, startTimeMs).detections;
+                
+                // Детекция рук
+                const handResults = handLandmarker.detectForVideo(video, startTimeMs);
 
                 // Удаляем старые выделения
-                document.querySelectorAll('.face-highlight').forEach(el => el.remove());
+                document.querySelectorAll('.face-highlight, .face-label').forEach(el => el.remove());
 
-                if (detections.length > 0) {
+                // Обработка обнаруженных лиц
+                if (faceDetections.length > 0) {
                     faceMask.classList.remove('hidden');
                     let maskPath = 'polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%)';
 
-                    detections.forEach(detection => {
+                    faceDetections.forEach(detection => {
                         const scaleX = video.clientWidth / video.videoWidth;
                         const scaleY = video.clientHeight / video.videoHeight;
 
@@ -304,8 +614,13 @@
                         targetingCircle.style.left = `${left + width / 2}px`;
                         targetingCircle.style.top = `${top + height / 2}px`;
 
+                        // Добавляем подпись внутри рамки
+                        const detectionLabel = document.createElement('div');
+                        detectionLabel.className = 'face-detection-label';
+                        detectionLabel.textContent = 'HUMAN DETECTED';
+                        highlight.appendChild(detectionLabel);
 
-                        // Добавляем подпись
+                        // Добавляем стандартную метку
                         const label = document.createElement('div');
                         label.className = 'face-label';
                         label.textContent = 'DETECTED';
@@ -329,13 +644,95 @@
                     targetingCircle.classList.remove('active');
                 }
 
+                // Обработка обнаруженных рук
+                handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+                if (handResults.landmarks && handResults.landmarks.length > 0) {
+                    for (const landmarks of handResults.landmarks) {
+                        const mirroredLandmarks = landmarks.map(point => ({
+                            x: 1 - point.x,
+                            y: point.y,
+                            z: point.z
+                        }));
+
+                        // Отрисовка соединений между точками с более мягким свечением
+                        handCtx.shadowColor = 'rgba(255, 0, 0, 0.5)';
+                        handCtx.shadowBlur = 15;
+                        handCtx.lineWidth = 3;
+                        drawConnectors(handCtx, mirroredLandmarks, HAND_CONNECTIONS, {
+                            color: "#ff0000",
+                            lineWidth: 2
+                        });
+                        
+                        // Сначала рисуем большое мягкое свечение
+                        handCtx.shadowColor = 'rgba(255, 0, 0, 0.3)';
+                        handCtx.shadowBlur = 20;
+                        drawLandmarks(handCtx, mirroredLandmarks, {
+                            color: "rgba(255, 0, 0, 0.1)",
+                            fillColor: "rgba(255, 0, 0, 0.1)",
+                            lineWidth: 1,
+                            radius: 15
+                        });
+                        
+                        // Второй слой свечения
+                        handCtx.shadowColor = 'rgba(255, 0, 0, 0.4)';
+                        handCtx.shadowBlur = 15;
+                        drawLandmarks(handCtx, mirroredLandmarks, {
+                            color: "rgba(255, 0, 0, 0.2)",
+                            fillColor: "rgba(255, 0, 0, 0.2)",
+                            lineWidth: 1,
+                            radius: 10
+                        });
+                        
+                        // Затем рисуем основные черные точки
+                        handCtx.shadowColor = 'rgba(255, 0, 0, 0.5)';
+                        handCtx.shadowBlur = 10;
+                        drawLandmarks(handCtx, mirroredLandmarks, {
+                            color: "#000000",
+                            fillColor: "#000000",
+                            lineWidth: 1,
+                            radius: 4
+                        });
+                        
+                        // И наконец тонкую красную обводку
+                        handCtx.shadowColor = 'rgba(255, 0, 0, 0.6)';
+                        handCtx.shadowBlur = 5;
+                        drawLandmarks(handCtx, mirroredLandmarks, {
+                            color: "#ff0000",
+                            fillColor: "transparent",
+                            lineWidth: 1,
+                            radius: 4
+                        });
+
+                        // Сохраняем историю жестов
+                        const gesture = detectGesture(landmarks);
+                        gestureHistory.push(gesture);
+                        if (gestureHistory.length > GESTURE_MEMORY) {
+                            gestureHistory.shift();
+                        }
+
+                        // Сохраняем позицию руки для определения свайпа
+                        lastHandPosition = mirroredLandmarks[8]; // Используем кончик указательного пальца
+
+                        const handCenter = mirroredLandmarks[0];
+                        updateGestureLabel(gesture, handCenter.x, handCenter.y, handCanvas.width, handCanvas.height);
+                    }
+                } else {
+                    const now = performance.now();
+                    if (now - lastHandTime > HAND_TIMEOUT_MS) {
+                        lastHandPosition = null;
+                        gestureHistory = [];
+                        updateGestureLabel(null);
+                        swipeDirection.classList.remove('visible');
+                    }
+                }
+
                 updateTimestamp();
             }
 
             requestAnimationFrame(predictWebcam);
         }
 
-        initializeFaceDetector();
+        initializeDetectors();
     </script>
 </body>
 

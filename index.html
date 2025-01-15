@@ -259,8 +259,8 @@
             background: rgba(0, 0, 0, 0.8);
             color: #ff0000;
             font-family: 'Courier New', monospace;
-            font-size: 16px;
-            padding: 8px 20px;
+            font-size: min(16px, calc(0.8vw + 8px));
+            padding: min(8px, calc(0.4vw + 4px)) min(20px, calc(1vw + 10px));
             border: 1px solid #ff0000;
             clip-path: polygon(0 0, 85% 0, 100% 100%, 0 100%);
             text-shadow: 0 0 5px #ff0000;
@@ -316,8 +316,9 @@
 
         // Константы
         const HAND_TIMEOUT_MS = 300; // Максимальное время отсутствия руки
-        const SWIPE_THRESHOLD = 0.15; // Порог для определения свайпа
+        const SWIPE_THRESHOLD = 0.08; // Уменьшаем порог для определения свайпа
         const GESTURE_MEMORY = 10; // Количество кадров для памяти жестов
+        const MIN_SWIPE_FRAMES = 3; // Минимальное количество кадров для свайпа
 
         let lastHandPosition = null;
         let lastHandTime = 0;
@@ -325,6 +326,8 @@
         let gestureHistory = [];
         let swipeDirection = document.querySelector('.swipe-direction');
         let isSwipeStarted = false; // Флаг начала свайпа
+        let swipeFrameCount = 0; // Счетчик кадров свайпа
+        let currentSwipeDirection = null; // Текущее направление свайпа
         
         // Инициализация детекторов
         async function initializeDetectors() {
@@ -359,10 +362,10 @@
             const ringTip = landmarks[16];
             const pinkyTip = landmarks[17];
             
-            return indexTip.y < landmarks[5].y - 0.1 && // Указательный палец выпрямлен
-                   middleTip.y > landmarks[9].y - 0.05 && // Остальные пальцы согнуты
-                   ringTip.y > landmarks[13].y - 0.05 &&
-                   pinkyTip.y > landmarks[17].y - 0.05;
+            return indexTip.y < landmarks[5].y - 0.05 && // Уменьшаем требование к выпрямлению
+                   (middleTip.y > landmarks[9].y - 0.1 || // Смягчаем условия для остальных пальцев
+                    ringTip.y > landmarks[13].y - 0.1 ||
+                    pinkyTip.y > landmarks[17].y - 0.1);
         }
 
         // Функция для определения свайпа
@@ -374,6 +377,8 @@
                 if (isPointerExtended(landmarks)) {
                     isSwipeStarted = true;
                     lastHandPosition = currentPosition;
+                    swipeFrameCount = 0;
+                    currentSwipeDirection = null;
                 }
                 return null;
             }
@@ -382,19 +387,37 @@
             if (!isPointerExtended(landmarks)) {
                 isSwipeStarted = false;
                 lastHandPosition = null;
+                swipeFrameCount = 0;
+                currentSwipeDirection = null;
                 return null;
             }
             
             const deltaX = currentPosition.x - lastHandPosition.x;
             console.log('Swipe delta:', deltaX);
             
+            // Определяем направление движения
+            const direction = deltaX > 0 ? 'right' : 'left';
+            
+            // Если направление изменилось, сбрасываем счетчик
+            if (currentSwipeDirection && currentSwipeDirection !== direction) {
+                swipeFrameCount = 0;
+            }
+            
+            currentSwipeDirection = direction;
+            
+            // Если движение достаточно заметное, увеличиваем счетчик
             if (Math.abs(deltaX) > SWIPE_THRESHOLD) {
-                const direction = deltaX > 0 ? 'right' : 'left';
-                console.log('Swipe detected:', direction);
-                // Сбрасываем состояние свайпа
-                isSwipeStarted = false;
-                lastHandPosition = null;
-                return direction;
+                swipeFrameCount++;
+                console.log('Swipe frame count:', swipeFrameCount);
+                
+                // Если набрали достаточно кадров, возвращаем направление
+                if (swipeFrameCount >= MIN_SWIPE_FRAMES) {
+                    console.log('Swipe detected:', currentSwipeDirection);
+                    isSwipeStarted = false;
+                    lastHandPosition = null;
+                    swipeFrameCount = 0;
+                    return currentSwipeDirection;
+                }
             }
             
             // Обновляем позицию для следующего кадра

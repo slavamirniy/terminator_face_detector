@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Face Surveillance System</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #webcam {
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+
+        .surveillance-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.9);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            mix-blend-mode: multiply;
+        }
+
+        .surveillance-overlay.active {
+            opacity: 1;
+        }
+
+        .face-highlight {
+            position: absolute;
+            border: 5px solid #ff0000;
+            box-shadow: 0 0 15px #ff0000;
+            transition: all 0.2s ease-out;
+            z-index: 100;
+            background: transparent;
+            overflow: hidden;
+            animation: borderBlink 1.5s infinite;
+        }
+
+        @keyframes borderBlink {
+            0% {
+                border-color: rgba(255, 0, 0, 1);
+            }
+
+            50% {
+                border-color: rgba(255, 0, 0, 0.3);
+            }
+
+            100% {
+                border-color: rgba(255, 0, 0, 1);
+            }
+        }
+
+        .face-label {
+            position: absolute;
+            color: #ff0000;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            text-transform: uppercase;
+            bottom: -25px;
+            left: 50%;
+            transform: translateX(-50%);
+            text-shadow: 0 0 5px #ff0000;
+            animation: textBlink 1.5s infinite;
+        }
+
+        @keyframes textBlink {
+            0% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.3;
+            }
+
+            100% {
+                opacity: 1;
+            }
+        }
+
+        .timestamp {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: #ff0000;
+            font-family: monospace;
+            font-size: 14px;
+            z-index: 1000;
+            text-shadow: 0 0 5px #ff0000;
+        }
+
+        .recording-dot {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 12px;
+            height: 12px;
+            background: #ff0000;
+            border-radius: 50%;
+            animation: blink 1s infinite;
+            z-index: 1000;
+            box-shadow: 0 0 10px #ff0000;
+        }
+
+        .targeting-circle {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) scale(0);
+            width: 100px;
+            height: 100px;
+            border: 2px solid #ff0000;
+            border-radius: 50%;
+            opacity: 0;
+            transition: all 0.5s ease;
+            z-index: 1001;
+            display: none;
+        }
+
+        .targeting-circle.active {
+            transform: translate(-50%, -50%) scale(1);
+            opacity: 0.7;
+            animation: pulseCircle 2s infinite;
+        }
+
+        @keyframes pulseCircle {
+            0% {
+                transform: translate(-50%, -50%) scale(1);
+                opacity: 0.7;
+            }
+
+            50% {
+                transform: translate(-50%, -50%) scale(1.2);
+                opacity: 0.3;
+            }
+
+            100% {
+                transform: translate(-50%, -50%) scale(1);
+                opacity: 0.7;
+            }
+        }
+
+        @keyframes blink {
+            50% {
+                opacity: 0;
+            }
+        }
+
+        .face-mask {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.9);
+            pointer-events: none;
+            z-index: 99;
+            opacity: 1;
+            transition: opacity 0.3s ease;
+            backdrop-filter: blur(2px);
+        }
+
+        .face-mask.hidden {
+            opacity: 0;
+        }
+
+        .hud-element {
+            position: fixed;
+            border: 1px solid rgba(255, 0, 0, 0.3);
+            pointer-events: none;
+            z-index: 98;
+            animation: hudScan 3s linear infinite;
+        }
+
+        @keyframes hudScan {
+            0% {
+                border-color: rgba(255, 0, 0, 0.3);
+            }
+
+            50% {
+                border-color: rgba(255, 0, 0, 0.7);
+            }
+
+            100% {
+                border-color: rgba(255, 0, 0, 0.3);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <video id="webcam" autoplay playsinline></video>
+    <div class="face-mask"></div>
+    <div class="surveillance-overlay"></div>
+    <div class="timestamp"></div>
+    <div class="recording-dot"></div>
+    <div class="targeting-circle"></div>
+    <div class="hud-element" style="top: 20px; left: 20px; width: 100px; height: 1px;"></div>
+    <div class="hud-element" style="top: 20px; right: 20px; width: 100px; height: 1px;"></div>
+    <div class="hud-element" style="bottom: 20px; left: 20px; width: 100px; height: 1px;"></div>
+    <div class="hud-element" style="bottom: 20px; right: 20px; width: 100px; height: 1px;"></div>
+
+    <script type="module">
+        import { FaceDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+        let faceDetector;
+        let video = document.getElementById('webcam');
+        let lastVideoTime = -1;
+        let faceMask = document.querySelector('.face-mask');
+        let overlay = document.querySelector('.surveillance-overlay');
+        let targetingCircle = document.querySelector('.targeting-circle');
+
+        // Инициализация детектора лиц
+        async function initializeFaceDetector() {
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+            );
+            faceDetector = await FaceDetector.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite`,
+                    delegate: "CPU"
+                },
+                runningMode: "VIDEO"
+            });
+            startWebcam();
+        }
+
+        // Запуск веб-камеры
+        async function startWebcam() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                video.addEventListener('loadeddata', predictWebcam);
+            } catch (err) {
+                console.error("Ошибка доступа к камере:", err);
+            }
+        }
+
+        // Обновление временной метки
+        function updateTimestamp() {
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString() + '.' + now.getMilliseconds().toString().padStart(3, '0');
+            document.querySelector('.timestamp').textContent = timestamp;
+        }
+
+        // Основной цикл детекции
+        async function predictWebcam() {
+            if (video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                const startTimeMs = performance.now();
+                const detections = faceDetector.detectForVideo(video, startTimeMs).detections;
+
+                // Удаляем старые выделения
+                document.querySelectorAll('.face-highlight').forEach(el => el.remove());
+
+                if (detections.length > 0) {
+                    faceMask.classList.remove('hidden');
+                    let maskPath = 'polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%)';
+
+                    detections.forEach(detection => {
+                        const scaleX = video.clientWidth / video.videoWidth;
+                        const scaleY = video.clientHeight / video.videoHeight;
+
+                        const width = detection.boundingBox.width * scaleX;
+                        const height = detection.boundingBox.width * scaleX;
+
+                        const leftOffset = detection.boundingBox.originX * scaleX;
+                        const topOffset = detection.boundingBox.originY * scaleY - height / 4;
+
+                        const verticalCenter = (video.clientHeight - video.videoHeight * scaleY) / 2;
+                        const left = video.offsetLeft + video.clientWidth - leftOffset - width;
+                        const top = video.offsetTop + topOffset + verticalCenter;
+
+                        // Создаем рамку выделения
+                        const highlight = document.createElement('div');
+                        highlight.className = 'face-highlight';
+                        highlight.style.width = `${width}px`;
+                        highlight.style.height = `${height}px`;
+                        highlight.style.left = `${left}px`;
+                        highlight.style.top = `${top}px`;
+
+                        // Устанавливаем позицию круга
+                        targetingCircle.style.left = `${left + width / 2}px`;
+                        targetingCircle.style.top = `${top + height / 2}px`;
+
+
+                        // Добавляем подпись
+                        const label = document.createElement('div');
+                        label.className = 'face-label';
+                        label.textContent = 'DETECTED';
+                        highlight.appendChild(label);
+
+                        document.body.appendChild(highlight);
+
+                        // Вырезаем область лица из маски
+                        const x1 = (left / video.clientWidth) * 100;
+                        const y1 = (top / video.clientHeight) * 100;
+                        const x2 = ((left + width) / video.clientWidth) * 100;
+                        const y2 = ((top + height) / video.clientHeight) * 100;
+
+                        maskPath = `polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% ${y1}%, ${x1}% ${y1}%, ${x1}% ${y2}%, ${x2}% ${y2}%, ${x2}% ${y1}%, 0% ${y1}%)`;
+                    });
+
+                    faceMask.style.clipPath = maskPath;
+                    targetingCircle.classList.add('active');
+                } else {
+                    faceMask.classList.add('hidden');
+                    targetingCircle.classList.remove('active');
+                }
+
+                updateTimestamp();
+            }
+
+            requestAnimationFrame(predictWebcam);
+        }
+
+        initializeFaceDetector();
+    </script>
+</body>
+
+</html>
